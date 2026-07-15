@@ -21,3 +21,4 @@ src-tauri/bin/
 # OS
 .DS_Store
 Thumbs.db
+\n.mimocode/
