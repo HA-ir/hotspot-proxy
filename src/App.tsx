@@ -198,7 +198,7 @@ function App() {
             </button>
           </div>
 
-          <div className={`card shadow-sm devices-card ${isActive ? 'visible' : 'hidden'}`}>
+          <div className={`card shadow-sm devices-card`}>
             <div className="card-header">
               <h2 className="card-title">Connected Devices</h2>
               <span className="badge">{devices.length}</span>
