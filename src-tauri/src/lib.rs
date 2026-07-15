@@ -4,47 +4,102 @@ mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
 
-use std::process::Command;
 use serde::Serialize;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize, Clone, Debug)]
-struct Device {
+pub struct Device {
     ip: String,
     mac: String,
     name: String,
 }
 
-#[tauri::command]
-fn get_connected_devices() -> Result<Vec<Device>, String> {
-    let output = Command::new("ip")
-        .args(["neigh", "show", "dev", "wlp0s20f3"])
-        .output()
-        .map_err(|e| e.to_string())?;
-        
-    if !output.status.success() {
-        return Err("Failed to get connected devices".into());
+fn validate_hotspot_inputs(ssid: &str, password: &str) -> Result<(), String> {
+    if ssid.trim().is_empty() || ssid.len() > 32 {
+        return Err("SSID must be 1-32 characters.".into());
     }
-    
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut devices = Vec::new();
-    
-    for line in stdout.lines() {
-        // Example line: 10.42.0.122 lladdr 12:34:56:78:9a:bc STALE
-        if line.contains("REACHABLE") || line.contains("STALE") || line.contains("DELAY") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 && parts[1] == "lladdr" {
-                let ip = parts[0].to_string();
-                let mac = parts[2].to_string();
-                
-                // For name, we try to resolve hostname via avahi or leave as Unknown
-                // To keep it fast and avoid hanging, we'll assign "Unknown Device" for now
-                let name = "Unknown Device".to_string();
-                
-                devices.push(Device { ip, mac, name });
+    if password.len() < 8 || password.len() > 63 {
+        return Err("Password must be 8-63 characters (WPA2 requirement).".into());
+    }
+    Ok(())
+}
+
+/// Read the hotspot's own DHCP lease file. NetworkManager runs a dedicated dnsmasq
+/// instance for `ipv4.method=shared` connections and writes leases here the instant
+/// a client gets an IP — far more immediate and reliable than waiting for that client
+/// to show up in the ARP/neighbor cache.
+fn read_dhcp_leases(wifi_if: &str) -> Vec<(String, String, String)> {
+    let lease_path = format!("/var/lib/NetworkManager/dnsmasq-{}.leases", wifi_if);
+    let content = match fs::read_to_string(&lease_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(), // no leases yet, or path differs on this distro — fall back to ARP only
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut leases = Vec::new();
+    for line in content.lines() {
+        // format: <expiry-epoch> <mac> <ip> <hostname-or-*> <client-id>
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let expiry: u64 = match parts[0].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if expiry != 0 && expiry < now {
+            continue; // expired lease, client is gone
+        }
+        let mac = parts[1].to_lowercase();
+        let ip = parts[2].to_string();
+        let hostname = if parts[3] == "*" { "Unknown Device".to_string() } else { parts[3].to_string() };
+        leases.push((mac, ip, hostname));
+    }
+    leases
+}
+
+#[tauri::command]
+pub fn get_connected_devices() -> Result<Vec<crate::Device>, String> {
+    let wifi_if = detect_wifi_interface()?;
+    let mut devices: Vec<crate::Device> = Vec::new();
+    let mut seen_macs = std::collections::HashSet::new();
+
+    // Primary source: DHCP leases. Catches a client the moment it joins.
+    for (mac, ip, name) in read_dhcp_leases(&wifi_if) {
+        if seen_macs.insert(mac.clone()) {
+            devices.push(crate::Device { ip, mac, name });
+        }
+    }
+
+    // Secondary source: ARP/neighbor table, to catch anything with a static IP
+    // that never went through DHCP. Failure here is non-fatal — leases alone
+    // are enough for the common case, so we don't error out the whole call.
+    if let Ok(output) = Command::new("ip").args(["neigh", "show", "dev", &wifi_if]).output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if line.contains("FAILED") || line.contains("INCOMPLETE") {
+                    continue;
+                }
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 && parts[1] == "lladdr" {
+                    let mac = parts[2].to_lowercase();
+                    if seen_macs.insert(mac.clone()) {
+                        devices.push(crate::Device {
+                            ip: parts[0].to_string(),
+                            mac,
+                            name: "Unknown Device".to_string(),
+                        });
+                    }
+                }
             }
         }
     }
-    
+
     Ok(devices)
 }
 
@@ -55,6 +110,8 @@ fn start_hotspot(
     password: String,
     proxy_url: String,
 ) -> Result<String, String> {
+    validate_hotspot_inputs(&ssid, &password)?;
+
     #[cfg(target_os = "linux")]
     {
         linux::start(&app, &ssid, &password, &proxy_url)

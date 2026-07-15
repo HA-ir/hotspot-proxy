@@ -17,8 +17,12 @@ function App() {
   const [isActive, setIsActive] = useState(false);
   const [devices, setDevices] = useState<Device[]>([]);
   const [toast, setToast] = useState("");
-  
+
   const logEndRef = useRef<HTMLDivElement>(null);
+
+  const isSsidValid = ssid.trim().length > 0 && ssid.length <= 32;
+  const isPasswordValid = password.length >= 8 && password.length <= 63;
+  const canStart = isSsidValid && isPasswordValid;
 
   // Auto-scroll logs
   useEffect(() => {
@@ -38,7 +42,7 @@ function App() {
   };
 
   const clearLogs = () => setStatus("");
-  
+
   const copyLogs = async () => {
     try {
       await navigator.clipboard.writeText(status);
@@ -49,51 +53,60 @@ function App() {
     }
   };
 
+  const devicesRef = useRef<Device[]>([]);
+  const isFetchingRef = useRef(false);
+
   async function fetchDevices() {
-    if (!isActive) return;
+    if (!isActive || isFetchingRef.current) return; // never let two polls overlap
+    isFetchingRef.current = true;
     try {
       const newDevs = await invoke<Device[]>("get_connected_devices");
-      
-      setDevices(prevDevs => {
-        // Create sets of MAC addresses to avoid duplicate logs in React Strict Mode
-        // and to handle proper diffing
-        const prevMacs = new Set(prevDevs.map(d => d.mac));
-        const newMacs = new Set(newDevs.map(d => d.mac));
+      const prevDevs = devicesRef.current;
 
-        // Check for newly connected devices (in new, not in prev)
-        newDevs.forEach(nd => {
-          if (!prevMacs.has(nd.mac)) {
-            addLog(`🟢 Device Connected: ${nd.ip} (MAC: ${nd.mac})`);
-          }
-        });
-        
-        // Check for disconnected devices (in prev, not in new)
-        prevDevs.forEach(pd => {
-          if (!newMacs.has(pd.mac)) {
-            addLog(`🔴 Device Disconnected: ${pd.ip} (MAC: ${pd.mac})`);
-          }
-        });
-        
-        return newDevs;
+      const prevMacs = new Set(prevDevs.map(d => d.mac));
+      const newMacs = new Set(newDevs.map(d => d.mac));
+
+      newDevs.forEach(nd => {
+        if (!prevMacs.has(nd.mac)) {
+          addLog(`🟢 Device Connected: ${nd.ip} (MAC: ${nd.mac})`);
+        }
       });
+
+      prevDevs.forEach(pd => {
+        if (!newMacs.has(pd.mac)) {
+          addLog(`🔴 Device Disconnected: ${pd.ip} (MAC: ${pd.mac})`);
+        }
+      });
+
+      devicesRef.current = newDevs;
+      setDevices(newDevs);
     } catch (e) {
       console.error(e);
+    } finally {
+      isFetchingRef.current = false;
     }
   }
 
-  // Poll devices every 5 seconds
+  // Poll devices every 3 seconds
   useEffect(() => {
     let interval: number;
     if (isActive) {
-      fetchDevices(); // immediate
-      interval = window.setInterval(fetchDevices, 5000);
+      devicesRef.current = [];
+      fetchDevices();
+      interval = window.setInterval(fetchDevices, 3000);
     } else {
+      devicesRef.current = [];
       setDevices([]);
     }
     return () => clearInterval(interval);
   }, [isActive]);
 
   async function toggleHotspot() {
+    if (!isActive && !canStart) {
+      addLog("❌ Fix the highlighted fields before starting the hotspot.");
+      return;
+    }
+
     setLoading(true);
     addLog(isActive ? "Initiating shutdown sequence..." : "Initiating hotspot sequence. Please authenticate if prompted...");
     try {
@@ -108,7 +121,7 @@ function App() {
       }
     } catch (error) {
       addLog(`❌ Error:\n${error}`);
-      if (!isActive) setIsActive(false); 
+      if (!isActive) setIsActive(false);
     }
     setLoading(false);
   }
@@ -133,13 +146,16 @@ function App() {
       </header>
 
       <div className="layout-grid">
-        {/* Left Column: Controls */}
+        {/* Controls */}
         <div className="controls-col">
           <div className="card shadow-sm">
             <h2 className="card-title">Network Configuration</h2>
-            
+
             <div className="form-group">
-              <label>Network Name (SSID)</label>
+              <label>
+                Network Name (SSID)
+                {!isSsidValid && ssid.length > 0 && <span className="field-hint invalid">Max 32 characters</span>}
+              </label>
               <div className="input-wrapper">
                 <input
                   type="text"
@@ -147,12 +163,19 @@ function App() {
                   onChange={(e) => setSsid(e.currentTarget.value)}
                   disabled={isActive || loading}
                   placeholder="e.g. MyWiFi"
+                  className={!isSsidValid && ssid.length > 0 ? "invalid" : ""}
+                  maxLength={32}
                 />
               </div>
             </div>
 
             <div className="form-group">
-              <label>Password</label>
+              <label>
+                Password
+                <span className={`field-hint ${!isPasswordValid ? "invalid" : ""}`}>
+                  {password.length}/63 (min 8)
+                </span>
+              </label>
               <div className="input-wrapper">
                 <input
                   type="password"
@@ -160,6 +183,8 @@ function App() {
                   onChange={(e) => setPassword(e.currentTarget.value)}
                   disabled={isActive || loading}
                   placeholder="Minimum 8 characters"
+                  className={!isPasswordValid ? "invalid" : ""}
+                  maxLength={63}
                 />
               </div>
             </div>
@@ -177,9 +202,9 @@ function App() {
               </div>
             </div>
 
-            <button 
-              onClick={toggleHotspot} 
-              disabled={loading} 
+            <button
+              onClick={toggleHotspot}
+              disabled={loading || (!isActive && !canStart)}
               className={`toggle-btn ${isActive ? 'active' : ''} ${loading ? 'loading' : ''}`}
             >
               {loading ? (
@@ -198,12 +223,12 @@ function App() {
             </button>
           </div>
 
-          <div className={`card shadow-sm devices-card`}>
+          <div className="card shadow-sm devices-card">
             <div className="card-header">
               <h2 className="card-title">Connected Devices</h2>
               <span className="badge">{devices.length}</span>
             </div>
-            
+
             {devices.length === 0 ? (
               <p className="no-devices">No devices connected yet.</p>
             ) : (
@@ -224,7 +249,7 @@ function App() {
           </div>
         </div>
 
-        {/* Right Column: Logs */}
+        {/* Logs */}
         <div className="logs-col">
           <div className="card shadow-sm logs-card">
             <div className="status-header">

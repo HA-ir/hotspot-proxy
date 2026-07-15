@@ -14,8 +14,9 @@
       {
         "title": "Hotspot Proxy",
         "width": 480,
-        "height": 700,
+        "height": 820,
         "resizable": false,
+        "center": true,
         "fullscreen": false
       }
     ],
