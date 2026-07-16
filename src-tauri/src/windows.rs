@@ -5,6 +5,36 @@ use std::collections::HashSet;
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn command_exists(cmd: &str) -> bool {
+    Command::new("where")
+        .arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn check_dependencies() -> Vec<crate::MissingDependency> {
+    let mut missing = Vec::new();
+
+    if !command_exists("powershell") {
+        missing.push(crate::MissingDependency {
+            name: "powershell".to_string(),
+            install_command: None,
+        });
+    }
+
+    if !command_exists("netsh") {
+        missing.push(crate::MissingDependency {
+            name: "netsh".to_string(),
+            install_command: None,
+        });
+    }
+
+    missing
+}
+
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<String, String> {
     let mut command = Command::new(cmd);
     for arg in args {

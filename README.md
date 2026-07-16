@@ -1,6 +1,6 @@
 # Hotspot Proxy
 
-A lightweight desktop application that turns your machine into a Wi-Fi hotspot and transparently routes all connected clients' traffic through a SOCKS5 proxy. No per-device configuration is required — clients connect to the Wi-Fi and are instantly proxied.
+A lightweight desktop application that turns your machine into a Wi-Fi hotspot and transparently routes all connected clients' traffic through a SOCKS5 or HTTP proxy. No per-device configuration is required — clients connect to the Wi-Fi and are instantly proxied.
 
 Built with [Tauri 2](https://tauri.app), [React](https://react.dev), and Rust.
 
@@ -18,7 +18,7 @@ Built with [Tauri 2](https://tauri.app), [React](https://react.dev), and Rust.
 
 ### Linux
 1. Creates a WPA2 Wi-Fi access point via NetworkManager (`nmcli`).
-2. Provisions a `tun0` interface and launches `tun2socks` attached to your SOCKS5 proxy.
+2. Provisions a `tun0` interface and launches `tun2socks` attached to your upstream proxy.
 3. Applies `iptables` rules to bridge traffic from the hotspot interface into the TUN interface.
 
 ### Windows
@@ -76,7 +76,9 @@ All configuration is done directly in the UI before initiating the hotspot:
 |---|---|---|
 | **Network Name (SSID)** | The Wi-Fi name broadcasted to devices. | `MySecureHotspot` |
 | **Password** | WPA2 security passphrase (min. 8 characters). | — |
-| **Proxy URL** | The upstream SOCKS5 endpoint. | `socks5://127.0.0.1:10808` |
+| **Proxy URL** | The upstream SOCKS5 or HTTP endpoint. | `socks5://127.0.0.1:10808` |
+
+> **⚠️ HTTP Proxy DNS Limitation:** Standard HTTP proxies do not support UDP forwarding. If you use an `http://` proxy, the app automatically bypasses the proxy tunnel for DNS queries so your browser continues to work. This means DNS requests will be visible to your local ISP. **For maximum privacy, always use `socks5://`.**
 
 ---
 

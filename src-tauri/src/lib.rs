@@ -13,6 +13,12 @@ pub struct Device {
     pub name: String,
 }
 
+#[derive(Serialize, Clone, Debug)]
+pub struct MissingDependency {
+    pub name: String,
+    pub install_command: Option<String>,
+}
+
 fn validate_hotspot_inputs(ssid: &str, password: &str) -> Result<(), String> {
     if ssid.trim().is_empty() || ssid.len() > 32 {
         return Err("SSID must be 1-32 characters.".into());
@@ -21,6 +27,16 @@ fn validate_hotspot_inputs(ssid: &str, password: &str) -> Result<(), String> {
         return Err("Password must be 8-63 characters (WPA2 requirement).".into());
     }
     Ok(())
+}
+
+#[tauri::command]
+fn check_system_dependencies() -> Vec<MissingDependency> {
+    #[cfg(target_os = "linux")]
+    { linux::check_dependencies() }
+    #[cfg(target_os = "windows")]
+    { windows::check_dependencies() }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    { Vec::new() }
 }
 
 #[tauri::command]
@@ -105,7 +121,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![start_hotspot, stop_hotspot, get_connected_devices, check_wintun, download_wintun])
+        .invoke_handler(tauri::generate_handler![start_hotspot, stop_hotspot, get_connected_devices, check_wintun, download_wintun, check_system_dependencies])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -9,6 +9,66 @@ interface Device {
   name: string;
 }
 
+interface MissingDependency {
+  name: string;
+  install_command: string | null;
+}
+
+type SysCheckState = "checking" | "ok" | "error";
+
+function SystemCheckModal({ onDone }: { onDone: () => void }) {
+  const [state, setState] = useState<SysCheckState>("checking");
+  const [missing, setMissing] = useState<MissingDependency[]>([]);
+
+  useEffect(() => {
+    invoke<MissingDependency[]>("check_system_dependencies")
+      .then(deps => {
+        if (deps.length === 0) {
+          setState("ok");
+          onDone();
+        } else {
+          setMissing(deps);
+          setState("error");
+        }
+      })
+      .catch((err) => {
+        console.error("System dependency check failed:", err);
+        setState("ok");
+        onDone();
+      });
+  }, [onDone]);
+
+  if (state === "checking" || state === "ok") return null;
+
+  return (
+    <div className="modal-backdrop" style={{ zIndex: 3000 }}>
+      <div className="modal-card">
+        <h2 className="modal-title">Missing System Dependencies</h2>
+        <p className="modal-body">
+          This app requires certain core networking tools to function. The following tools were not found in your system's PATH:
+        </p>
+
+        <ul className="modal-body" style={{ background: "#f8f9fa", padding: "10px 10px 10px 25px", borderRadius: "6px", fontFamily: "monospace", fontSize: "0.85rem" }}>
+          {missing.map((dep, i) => (
+            <li key={i} style={{ marginBottom: "8px" }}>
+              <strong>{dep.name}</strong>
+              {dep.install_command && (
+                <div style={{ color: "var(--text-muted)", marginTop: "4px" }}>
+                  <em>e.g. <code>{dep.install_command}</code></em>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+
+        <p className="modal-body" style={{ fontSize: "0.85rem", color: "var(--text-muted)" }}>
+          Please install these tools and restart the application.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 type WintunState = "checking" | "ok" | "prompt" | "downloading" | "error";
 
 function WintunModal({ onDone }: { onDone: () => void }) {
@@ -94,8 +154,11 @@ function App() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [toast, setToast] = useState("");
   const [wintunReady, setWintunReady] = useState(false);
+  const [sysReady, setSysReady] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
 
   const logEndRef = useRef<HTMLDivElement>(null);
+  const logContainerRef = useRef<HTMLPreElement>(null);
 
   const isSsidValid = ssid.trim().length > 0 && ssid.length <= 32;
   const isPasswordValid = password.length >= 8 && password.length <= 63;
@@ -103,10 +166,27 @@ function App() {
 
   // Auto-scroll logs
   useEffect(() => {
-    if (logEndRef.current) {
-      logEndRef.current.scrollIntoView({ behavior: "smooth" });
+    if (autoScroll && logContainerRef.current) {
+      // Use instant scroll. Smooth scrolling can trigger the onScroll handler
+      // mid-animation and accidentally disable auto-scroll.
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
     }
-  }, [status]);
+  }, [status, autoScroll]);
+
+  // Detect manual scrolling up
+  const handleLogScroll = () => {
+    if (!logContainerRef.current) return;
+    const { scrollTop, scrollHeight, clientHeight } = logContainerRef.current;
+
+    // Increased threshold to 30px to account for browser sub-pixel rounding
+    const isAtBottom = Math.abs(scrollHeight - clientHeight - scrollTop) <= 30;
+
+    if (!isAtBottom && autoScroll) {
+      setAutoScroll(false);
+    } else if (isAtBottom && !autoScroll) {
+      setAutoScroll(true);
+    }
+  };
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -219,7 +299,8 @@ function App() {
 
   return (
     <>
-      {!wintunReady && <WintunModal onDone={() => setWintunReady(true)} />}
+      {!sysReady && <SystemCheckModal onDone={() => setSysReady(true)} />}
+      {sysReady && !wintunReady && <WintunModal onDone={() => setWintunReady(true)} />}
       <main className="container">
         {toast && <div className="toast">{toast}</div>}
 
@@ -235,7 +316,7 @@ function App() {
           </div>
           <div>
             <h1>Hotspot Proxy</h1>
-            <p className="subtitle">Route all devices through SOCKS5</p>
+            <p className="subtitle">Route all devices through a proxy</p>
           </div>
         </div>
         <button
@@ -316,14 +397,17 @@ function App() {
             </div>
 
             <div className="form-group">
-              <label>Proxy URL</label>
+              <label>
+                Proxy URL
+                <span className="field-hint">SOCKS5 or HTTP</span>
+              </label>
               <div className="input-wrapper">
                 <input
                   type="text"
                   value={proxyUrl}
                   onChange={(e) => setProxyUrl(e.currentTarget.value)}
                   disabled={isActive || loading}
-                  placeholder="socks5://127.0.0.1:10808"
+                  placeholder="socks5://... or http://..."
                 />
               </div>
             </div>
@@ -384,6 +468,16 @@ function App() {
                 <h2 className="card-title">Console Log</h2>
               </div>
               <div className="log-actions">
+                <button
+                  onClick={() => setAutoScroll(!autoScroll)}
+                  className={`icon-btn ${autoScroll ? "active" : ""}`}
+                  title={autoScroll ? "Disable Auto-scroll" : "Enable Auto-scroll"}
+                >
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="12" y1="5" x2="12" y2="19"></line>
+                    <polyline points="19 12 12 19 5 12"></polyline>
+                  </svg>
+                </button>
                 <button onClick={copyLogs} className="icon-btn" title="Copy Logs">
                   <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                 </button>
@@ -393,8 +487,10 @@ function App() {
               </div>
             </div>
             <div className="log-scroll-area">
-              <pre className="log-pre">{status || "System ready. Awaiting commands..."}</pre>
-              <div ref={logEndRef} />
+              <pre className="log-pre" ref={logContainerRef} onScroll={handleLogScroll}>
+                {status || "System ready. Awaiting commands..."}
+                <div ref={logEndRef} style={{ height: 1 }} />
+              </pre>
             </div>
           </div>
         </div>

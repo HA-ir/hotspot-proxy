@@ -5,6 +5,50 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::{HashMap, HashSet};
 
+fn command_exists(cmd: &str) -> bool {
+    Command::new("which")
+        .arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn check_dependencies() -> Vec<crate::MissingDependency> {
+    let mut missing = Vec::new();
+
+    if !command_exists("nmcli") {
+        missing.push(crate::MissingDependency {
+            name: "networkmanager (nmcli)".to_string(),
+            install_command: Some("sudo apt install network-manager".to_string()),
+        });
+    }
+
+    if !command_exists("ip") {
+        missing.push(crate::MissingDependency {
+            name: "iproute2 (ip)".to_string(),
+            install_command: Some("sudo apt install iproute2".to_string()),
+        });
+    }
+
+    if !command_exists("iptables") {
+        missing.push(crate::MissingDependency {
+            name: "iptables".to_string(),
+            install_command: Some("sudo apt install iptables".to_string()),
+        });
+    }
+
+    if !command_exists("pkexec") {
+        missing.push(crate::MissingDependency {
+            name: "polkit (pkexec)".to_string(),
+            install_command: Some("sudo apt install policykit-1".to_string()),
+        });
+    }
+
+    missing
+}
+
 /// Auto-detect the first Wi-Fi capable network device via NetworkManager.
 pub fn detect_wifi_interface() -> Result<String, String> {
     let output = Command::new("nmcli")
@@ -206,6 +250,20 @@ pub fn start(_app: &tauri::AppHandle, ssid: &str, password: &str, proxy_url: &st
 
     let tun2socks_bin_q = shell_quote(tun2socks_path.to_str().unwrap());
 
+    let is_http = proxy_url.to_lowercase().starts_with("http");
+    let hotspot_gateway = "10.42.0.1";
+
+    // DNS Handling Strategy:
+    // - SOCKS5: We DNAT all DNS traffic from the hotspot to 8.8.8.8. It gets routed into tun0,
+    //   and tun2socks natively proxies the UDP DNS to 8.8.8.8 over the SOCKS5 tunnel safely.
+    // - HTTP: HTTP proxies don't support UDP. We bypass tun0 for all DNS queries (UDP 53)
+    //   by routing them to the 'main' table, so the host resolves them directly.
+    let dns_setup = if is_http {
+        format!("ip rule add from {} ipproto udp dport 53 table main pref 90 2>/dev/null || true", hotspot_subnet)
+    } else {
+        format!("iptables -t nat -I PREROUTING -i {} -p udp --dport 53 -j DNAT --to-destination 8.8.8.8:53", wifi_if)
+    };
+
     let script = format!(r#"#!/bin/bash
 set -e
 
@@ -241,10 +299,14 @@ sysctl -w net.ipv4.conf.all.rp_filter=0 > /dev/null
 sysctl -w net.ipv4.conf.{tun_if}.rp_filter=0 > /dev/null
 sysctl -w net.ipv4.conf.{wifi_if}.rp_filter=0 > /dev/null
 
-# All hotspot-subnet traffic (including DNS) is routed through tun0 -> tun2socks -> SOCKS5.
-# No DNS-specific DNAT rule here on purpose: carving DNS out to a hardcoded resolver
-# would leak every domain lookup outside the proxy tunnel.
-ip rule add from {hotspot_subnet} table {table_id} 2>/dev/null || true
+# Apply DNS strategy (SOCKS5 vs HTTP)
+{dns_setup}
+
+# Ensure local subnet traffic (like dnsmasq replies) bypasses the tunnel
+ip rule add to {hotspot_subnet} table main pref 95 2>/dev/null || true
+
+# Route everything else from the hotspot subnet into tun2socks
+ip rule add from {hotspot_subnet} table {table_id} pref 100 2>/dev/null || true
 ip route add default dev {tun_if} table {table_id} 2>/dev/null || true
 ip route flush cache
 
@@ -281,7 +343,10 @@ if [ -f /tmp/tun2socks.pid ]; then
 fi
 
 echo "Removing routing rules and iptables..."
-ip rule del from {hotspot_subnet} table {table_id} 2>/dev/null || true
+iptables -t nat -D PREROUTING -i {wifi_if} -p udp --dport 53 -j DNAT --to-destination 8.8.8.8:53 2>/dev/null || true
+ip rule del from {hotspot_subnet} ipproto udp dport 53 table main pref 90 2>/dev/null || true
+ip rule del to {hotspot_subnet} table main pref 95 2>/dev/null || true
+ip rule del from {hotspot_subnet} table {table_id} pref 100 2>/dev/null || true
 iptables -D FORWARD -i {tun_if} -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -o {tun_if} -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i {wifi_if} -o {tun_if} -j ACCEPT 2>/dev/null || true
