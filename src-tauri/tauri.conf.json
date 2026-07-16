@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "hotspot-proxy-app",
+  "productName": "Hotspot Proxy",
   "version": "0.1.0",
   "identifier": "com.hossein.hotspot-proxy-app",
   "build": {
