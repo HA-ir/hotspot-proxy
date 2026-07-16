@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Auto-detect the first Wi-Fi capable network device via NetworkManager.
 /// Replaces the previous hardcoded "wlp0s20f3", which only worked on one machine.
-fn detect_wifi_interface() -> Result<String, String> {
+pub fn detect_wifi_interface() -> Result<String, String> {
     let output = Command::new("nmcli")
         .args(["-t", "-f", "DEVICE,TYPE", "device", "status"])
         .output()
@@ -196,34 +196,3 @@ echo "Hotspot stopped and cleanup completed."
     run_privileged_script(&script)
 }
 
-/// Poll ARP/neighbor table on the hotspot's Wi-Fi interface for connected clients.
-pub fn get_connected_devices() -> Result<Vec<crate::Device>, String> {
-    let wifi_if = detect_wifi_interface()?;
-
-    let output = Command::new("ip")
-        .args(["neigh", "show", "dev", &wifi_if])
-        .output()
-        .map_err(|e| e.to_string())?;
-
-    if !output.status.success() {
-        return Err("Failed to get connected devices".into());
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut devices = Vec::new();
-
-    for line in stdout.lines() {
-        if line.contains("REACHABLE") || line.contains("STALE") || line.contains("DELAY") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 && parts[1] == "lladdr" {
-                devices.push(crate::Device {
-                    ip: parts[0].to_string(),
-                    mac: parts[2].to_string(),
-                    name: "Unknown Device".to_string(),
-                });
-            }
-        }
-    }
-
-    Ok(devices)
-}

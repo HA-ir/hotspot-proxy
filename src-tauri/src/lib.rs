@@ -6,6 +6,10 @@ mod windows;
 
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::fs;
+use crate::linux::detect_wifi_interface;
+use std::process::Command;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Serialize, Clone, Debug)]
 pub struct Device {
@@ -24,15 +28,12 @@ fn validate_hotspot_inputs(ssid: &str, password: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Read the hotspot's own DHCP lease file. NetworkManager runs a dedicated dnsmasq
-/// instance for `ipv4.method=shared` connections and writes leases here the instant
-/// a client gets an IP — far more immediate and reliable than waiting for that client
-/// to show up in the ARP/neighbor cache.
-fn read_dhcp_leases(wifi_if: &str) -> Vec<(String, String, String)> {
+// Read DHCP leases for hostname enrichment only (mac -> hostname).
+fn read_dhcp_hostnames(wifi_if: &str) -> HashMap<String, String> {
     let lease_path = format!("/var/lib/NetworkManager/dnsmasq-{}.leases", wifi_if);
     let content = match fs::read_to_string(&lease_path) {
         Ok(c) => c,
-        Err(_) => return Vec::new(), // no leases yet, or path differs on this distro — fall back to ARP only
+        Err(_) => return HashMap::new(),
     };
 
     let now = SystemTime::now()
@@ -40,63 +41,86 @@ fn read_dhcp_leases(wifi_if: &str) -> Vec<(String, String, String)> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let mut leases = Vec::new();
+    let mut map = HashMap::new();
     for line in content.lines() {
         // format: <expiry-epoch> <mac> <ip> <hostname-or-*> <client-id>
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 4 {
-            continue;
-        }
-        let expiry: u64 = match parts[0].parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if expiry != 0 && expiry < now {
-            continue; // expired lease, client is gone
-        }
+        if parts.len() < 4 { continue; }
+        let expiry: u64 = match parts[0].parse() { Ok(v) => v, Err(_) => continue };
+        if expiry != 0 && expiry < now { continue; }
         let mac = parts[1].to_lowercase();
-        let ip = parts[2].to_string();
-        let hostname = if parts[3] == "*" { "Unknown Device".to_string() } else { parts[3].to_string() };
-        leases.push((mac, ip, hostname));
+        if parts[3] != "*" {
+            map.insert(mac, parts[3].to_string());
+        }
     }
-    leases
+    map
+}
+
+// Probe whether an IP is still reachable by sending one ICMP ping (1s timeout).
+fn is_reachable(ip: &str, iface: &str) -> bool {
+    Command::new("ping")
+        .args(["-c", "1", "-W", "1", "-I", iface, "-n", ip])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 #[tauri::command]
-pub fn get_connected_devices() -> Result<Vec<crate::Device>, String> {
+fn get_connected_devices() -> Result<Vec<crate::Device>, String> {
     let wifi_if = detect_wifi_interface()?;
-    let mut devices: Vec<crate::Device> = Vec::new();
-    let mut seen_macs = std::collections::HashSet::new();
+    let hostnames = read_dhcp_hostnames(&wifi_if);
 
-    // Primary source: DHCP leases. Catches a client the moment it joins.
-    for (mac, ip, name) in read_dhcp_leases(&wifi_if) {
-        if seen_macs.insert(mac.clone()) {
-            devices.push(crate::Device { ip, mac, name });
-        }
-    }
+    // Step 1: collect candidate IPs from the ARP table (exclude definitively dead states).
+    let arp_out = Command::new("ip")
+        .args(["neigh", "show", "dev", &wifi_if])
+        .output()
+        .map_err(|e| format!("Failed to run 'ip neigh': {}", e))?;
 
-    // Secondary source: ARP/neighbor table, to catch anything with a static IP
-    // that never went through DHCP. Failure here is non-fatal — leases alone
-    // are enough for the common case, so we don't error out the whole call.
-    if let Ok(output) = Command::new("ip").args(["neigh", "show", "dev", &wifi_if]).output() {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if line.contains("FAILED") || line.contains("INCOMPLETE") {
-                    continue;
-                }
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 && parts[1] == "lladdr" {
-                    let mac = parts[2].to_lowercase();
+    let mut candidates: Vec<(String, String)> = Vec::new(); // (ip, mac)
+    let mut seen_macs = HashSet::new();
+
+    if arp_out.status.success() {
+        let stdout = String::from_utf8_lossy(&arp_out.stdout);
+        for line in stdout.lines() {
+            if line.contains("FAILED") || line.contains("INCOMPLETE") || line.contains("NOARP") {
+                continue;
+            }
+            // format: <ip> dev <iface> lladdr <mac> <STATE>
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            // find "lladdr" token and take the next token as MAC
+            if let Some(idx) = parts.iter().position(|&t| t == "lladdr") {
+                if let Some(mac_str) = parts.get(idx + 1) {
+                    let ip = parts[0].to_string();
+                    let mac = mac_str.to_lowercase();
                     if seen_macs.insert(mac.clone()) {
-                        devices.push(crate::Device {
-                            ip: parts[0].to_string(),
-                            mac,
-                            name: "Unknown Device".to_string(),
-                        });
+                        candidates.push((ip, mac));
                     }
                 }
             }
+        }
+    }
+
+    // Step 2: probe each candidate in parallel, keep only live ones.
+    // For typical hotspot sizes (1–10 devices) this takes ~500 ms worst-case.
+    use std::thread;
+    let wifi_if_clone = wifi_if.clone();
+    let handles: Vec<_> = candidates
+        .into_iter()
+        .map(|(ip, mac)| {
+            let iface = wifi_if_clone.clone();
+            thread::spawn(move || {
+                if is_reachable(&ip, &iface) { Some((ip, mac)) } else { None }
+            })
+        })
+        .collect();
+
+    let mut devices: Vec<crate::Device> = Vec::new();
+    for h in handles {
+        if let Some((ip, mac)) = h.join().unwrap_or(None) {
+            let name = hostnames.get(&mac).cloned().unwrap_or_else(|| "Unknown Device".to_string());
+            devices.push(crate::Device { ip, mac, name });
         }
     }
 

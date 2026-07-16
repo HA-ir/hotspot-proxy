@@ -55,31 +55,45 @@ function App() {
 
   const devicesRef = useRef<Device[]>([]);
   const isFetchingRef = useRef(false);
+  const isActiveRef = useRef(false);
+
+  useEffect(() => {
+    isActiveRef.current = isActive;
+  }, [isActive]);
+
+  const addLogRef = useRef(addLog);
+  useEffect(() => {
+    addLogRef.current = addLog;
+  });
+
+  // Diff newDevs against devicesRef and emit connect/disconnect logs, then commit.
+  function applyDeviceDiff(newDevs: Device[]) {
+    const prevDevs = devicesRef.current;
+    const prevMacs = new Set(prevDevs.map(d => d.mac));
+    const newMacs = new Set(newDevs.map(d => d.mac));
+
+    newDevs.forEach(nd => {
+      if (!prevMacs.has(nd.mac)) {
+        addLogRef.current(`🟢 Device Connected: ${nd.ip} (MAC: ${nd.mac})`);
+      }
+    });
+
+    prevDevs.forEach(pd => {
+      if (!newMacs.has(pd.mac)) {
+        addLogRef.current(`🔴 Device Disconnected: ${pd.ip} (MAC: ${pd.mac})`);
+      }
+    });
+
+    devicesRef.current = newDevs;
+    setDevices(newDevs);
+  }
 
   async function fetchDevices() {
-    if (!isActive || isFetchingRef.current) return; // never let two polls overlap
+    if (!isActiveRef.current || isFetchingRef.current) return;
     isFetchingRef.current = true;
     try {
       const newDevs = await invoke<Device[]>("get_connected_devices");
-      const prevDevs = devicesRef.current;
-
-      const prevMacs = new Set(prevDevs.map(d => d.mac));
-      const newMacs = new Set(newDevs.map(d => d.mac));
-
-      newDevs.forEach(nd => {
-        if (!prevMacs.has(nd.mac)) {
-          addLog(`🟢 Device Connected: ${nd.ip} (MAC: ${nd.mac})`);
-        }
-      });
-
-      prevDevs.forEach(pd => {
-        if (!newMacs.has(pd.mac)) {
-          addLog(`🔴 Device Disconnected: ${pd.ip} (MAC: ${pd.mac})`);
-        }
-      });
-
-      devicesRef.current = newDevs;
-      setDevices(newDevs);
+      applyDeviceDiff(newDevs);
     } catch (e) {
       console.error(e);
     } finally {
@@ -87,17 +101,15 @@ function App() {
     }
   }
 
-  // Poll devices every 3 seconds
+  // Poll devices every 2 seconds while hotspot is active
   useEffect(() => {
     let interval: number;
     if (isActive) {
       devicesRef.current = [];
       fetchDevices();
-      interval = window.setInterval(fetchDevices, 3000);
-    } else {
-      devicesRef.current = [];
-      setDevices([]);
+      interval = window.setInterval(fetchDevices, 1500);
     }
+    // Cleanup on stop: interval cleared, devicesRef already zeroed by stop handler
     return () => clearInterval(interval);
   }, [isActive]);
 
@@ -108,10 +120,13 @@ function App() {
     }
 
     setLoading(true);
-    addLog(isActive ? "Initiating shutdown sequence..." : "Initiating hotspot sequence. Please authenticate if prompted...");
+    addLog(isActive ? "Initiating shutdown sequence..." : "Initiating hotspot sequence. Authenticate if prompted.");
     try {
       if (isActive) {
         const res = await invoke("stop_hotspot");
+        // Emit disconnects for all devices still tracked, then clear immediately
+        applyDeviceDiff([]);
+        devicesRef.current = [];
         addLog(`✅ Hotspot Stopped!\n${res}`);
         setIsActive(false);
       } else {
