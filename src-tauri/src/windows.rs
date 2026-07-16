@@ -179,7 +179,6 @@ pub fn wintun_path() -> std::path::PathBuf {
     let exe_path = std::env::current_exe().unwrap_or_default();
     exe_path.parent().unwrap_or(std::path::Path::new(".")).join("wintun.dll")
 }
-
 pub fn wintun_exists() -> bool {
     let p = wintun_path();
     if p.exists() { return true; }
@@ -192,7 +191,8 @@ pub fn wintun_exists() -> bool {
 
 pub fn download_wintun() -> Result<String, String> {
     let dest = wintun_path();
-    let dest_str = dest.to_str().unwrap_or("wintun.dll");
+    let dest_str = dest.to_str()
+        .ok_or_else(|| "wintun install path contains non-UTF-8 characters".to_string())?;
 
     // wintun ships as a zip containing amd64/wintun.dll.
     // We download with PowerShell's built-in Invoke-WebRequest and extract with Expand-Archive.
@@ -248,12 +248,12 @@ Write-Output "Mobile Hotspot started."
 
     // Step 2 — Locate tun2socks binary.
     let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
-    let bin_dir = exe_path.parent().unwrap();
+    let bin_dir = exe_path.parent().ok_or("Executable has no parent directory")?;
     let mut tun2socks_path = bin_dir.join("tun2socks.exe");
 
     if !tun2socks_path.exists() {
-        tun2socks_path = std::env::current_dir()
-            .unwrap()
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        tun2socks_path = cwd
             .join("src-tauri")
             .join("bin")
             .join("tun2socks-x86_64-pc-windows-msvc.exe");
@@ -309,6 +309,11 @@ Write-Output "Mobile Hotspot started."
 pub fn stop() -> Result<String, String> {
     // Stop tun2socks.
     let _ = run_cmd("taskkill", &["/F", "/IM", "tun2socks.exe"]);
+
+    // Remove the tun0 interface so it doesn't linger for the next start.
+    let _ = run_powershell(
+        r#"$a = Get-NetAdapter | Where-Object { $_.InterfaceAlias -eq 'tun0' }; if ($a) { Remove-NetAdapter -Name 'tun0' -Confirm:$false }"#,
+    );
 
     // Remove routing entry.
     let _ = run_cmd("route", &["delete", "192.168.137.0"]);

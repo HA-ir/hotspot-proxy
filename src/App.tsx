@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
@@ -19,13 +19,15 @@ type SysCheckState = "checking" | "ok" | "error";
 function SystemCheckModal({ onDone }: { onDone: () => void }) {
   const [state, setState] = useState<SysCheckState>("checking");
   const [missing, setMissing] = useState<MissingDependency[]>([]);
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
 
   useEffect(() => {
     invoke<MissingDependency[]>("check_system_dependencies")
       .then(deps => {
         if (deps.length === 0) {
           setState("ok");
-          onDone();
+          onDoneRef.current();
         } else {
           setMissing(deps);
           setState("error");
@@ -34,9 +36,10 @@ function SystemCheckModal({ onDone }: { onDone: () => void }) {
       .catch((err) => {
         console.error("System dependency check failed:", err);
         setState("ok");
-        onDone();
+        onDoneRef.current();
       });
-  }, [onDone]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   if (state === "checking" || state === "ok") return null;
 
@@ -74,28 +77,31 @@ type WintunState = "checking" | "ok" | "prompt" | "downloading" | "error";
 function WintunModal({ onDone }: { onDone: () => void }) {
   const [state, setState] = useState<WintunState>("checking");
   const [error, setError] = useState("");
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
 
   useEffect(() => {
     invoke<boolean>("check_wintun")
       .then(ok => {
         setState(ok ? "ok" : "prompt");
-        if (ok) onDone();
+        if (ok) onDoneRef.current();
       })
       .catch((err) => {
         console.error("wintun check failed:", err);
         // If the check command fails entirely (e.g. not registered), just let them through
         // so the app isn't bricked.
         setState("ok");
-        onDone();
+        onDoneRef.current();
       });
-  }, [onDone]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   async function handleDownload() {
     setState("downloading");
     try {
       await invoke("download_wintun");
       setState("ok");
-      onDone();
+      onDoneRef.current();
     } catch (e) {
       setError(String(e));
       setState("error");
@@ -188,10 +194,22 @@ function App() {
     }
   };
 
-  const showToast = (msg: string) => {
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = useCallback((msg: string) => {
     setToast(msg);
-    setTimeout(() => setToast(""), 3000);
-  };
+    if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => {
+      setToast("");
+      toastTimerRef.current = null;
+    }, 3000);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) clearTimeout(toastTimerRef.current);
+    };
+  }, []);
 
   const addLog = (msg: string) => {
     const timestamp = new Date().toLocaleTimeString([], { hour12: false });
@@ -283,7 +301,6 @@ function App() {
         const res = await invoke("stop_hotspot");
         // Emit disconnects for all devices still tracked, then clear immediately
         applyDeviceDiff([]);
-        devicesRef.current = [];
         addLog(`✅ Hotspot Stopped!\n${res}`);
         setIsActive(false);
       } else {

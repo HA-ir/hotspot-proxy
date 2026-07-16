@@ -237,18 +237,21 @@ pub fn start(_app: &tauri::AppHandle, ssid: &str, password: &str, proxy_url: &st
 
     // Locate the sidecar binary
     let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
-    let bin_dir = exe_path.parent().unwrap();
+    let bin_dir = exe_path.parent().ok_or("Executable has no parent directory")?;
     let mut tun2socks_path = bin_dir.join("tun2socks");
 
     if !tun2socks_path.exists() {
-        tun2socks_path = std::env::current_dir().unwrap().join("src-tauri").join("bin").join("tun2socks-x86_64-unknown-linux-gnu");
+        let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+        tun2socks_path = cwd.join("src-tauri").join("bin").join("tun2socks-x86_64-unknown-linux-gnu");
     }
 
     if !tun2socks_path.exists() {
         return Err("Bundled tun2socks binary not found!".to_string());
     }
 
-    let tun2socks_bin_q = shell_quote(tun2socks_path.to_str().unwrap());
+    let tun2socks_bin_q = shell_quote(
+        tun2socks_path.to_str().ok_or("tun2socks path contains non-UTF-8 characters")?
+    );
 
     let is_http = proxy_url.to_lowercase().starts_with("http");
 
@@ -292,7 +295,14 @@ ip link set {tun_if} up
 
 echo "Starting tun2socks..."
 {tun2socks_bin_q} --device {tun_if} --proxy {proxy_url_q} --loglevel debug > /var/log/tun2socks.log 2>&1 &
-echo $! > /tmp/tun2socks.pid
+TUN2SOCKS_PID=$!
+echo $TUN2SOCKS_PID > /tmp/tun2socks.pid
+sleep 1
+if ! kill -0 $TUN2SOCKS_PID 2>/dev/null; then
+    echo "tun2socks failed to start. Last log:" >&2
+    tail -n 20 /var/log/tun2socks.log >&2
+    exit 1
+fi
 
 echo "Applying routing and iptables..."
 sysctl -w net.ipv4.conf.all.rp_filter=0 > /dev/null
