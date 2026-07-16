@@ -251,7 +251,6 @@ pub fn start(_app: &tauri::AppHandle, ssid: &str, password: &str, proxy_url: &st
     let tun2socks_bin_q = shell_quote(tun2socks_path.to_str().unwrap());
 
     let is_http = proxy_url.to_lowercase().starts_with("http");
-    let hotspot_gateway = "10.42.0.1";
 
     // DNS Handling Strategy:
     // - SOCKS5: We DNAT all DNS traffic from the hotspot to 8.8.8.8. It gets routed into tun0,
