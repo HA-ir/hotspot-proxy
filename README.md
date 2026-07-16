@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" width="200" alt="Hotspot Proxy Logo">
+</p>
+
 # Hotspot Proxy
 
 A lightweight desktop application that turns your machine into a Wi-Fi hotspot and transparently routes all connected clients' traffic through a SOCKS5 or HTTP proxy. No per-device configuration is required — clients connect to the Wi-Fi and are instantly proxied.
