@@ -1,141 +1,101 @@
 # Hotspot Proxy
 
-A desktop app that turns your Linux machine into a Wi-Fi hotspot and routes every connected device's traffic through a SOCKS5 proxy — no per-device configuration required.
+A lightweight desktop application that turns your machine into a Wi-Fi hotspot and transparently routes all connected clients' traffic through a SOCKS5 proxy. No per-device configuration is required — clients connect to the Wi-Fi and are instantly proxied.
 
 Built with [Tauri 2](https://tauri.app), [React](https://react.dev), and Rust.
+
+## Features
+
+- **Transparent Proxying:** All TCP, UDP, and DNS traffic from connected devices is routed through the proxy tunnel automatically.
+- **Cross-Platform Support:** Works natively on both Linux and Windows 10/11.
+- **Real-Time Device Tracking:** Active ARP probing ensures the connected devices list is accurate and never stale.
+- **Zero Client Config:** Devices connect to the hotspot with a standard WPA2 password; routing happens seamlessly at the network layer on the host machine.
+- **Self-Contained:** Bundles the high-performance `tun2socks` routing engine.
 
 ---
 
 ## How it works
 
-1. Creates a Wi-Fi access point via NetworkManager (`nmcli`)
-2. Brings up a TUN interface and starts [tun2socks](https://github.com/xjasonlyu/tun2socks) to forward all traffic through your SOCKS5 proxy
-3. Adds routing rules and iptables so every device that joins the hotspot is transparently proxied — including DNS
+### Linux
+1. Creates a WPA2 Wi-Fi access point via NetworkManager (`nmcli`).
+2. Provisions a `tun0` interface and launches `tun2socks` attached to your SOCKS5 proxy.
+3. Applies `iptables` rules to bridge traffic from the hotspot interface into the TUN interface.
 
-Connected devices appear in real time. The app probes each ARP entry with a live ping so the device list is always accurate, not stale.
-
----
-
-## Features
-
-- One-click hotspot start/stop with pkexec authentication
-- Transparent SOCKS5 routing for all connected devices (TCP + DNS)
-- Real-time device list — connects and disconnects logged with timestamps
-- Hostname resolution via DHCP lease enrichment
-- Supports both Linux and Windows builds
+### Windows
+1. Provisions a Mobile Hotspot via the native WinRT `NetworkOperatorTetheringManager` API (bypassing legacy `netsh` limitations).
+2. Launches `tun2socks` with the WinTUN driver to create a virtual network adapter.
+3. Adjusts the Windows routing table and enables IP forwarding (`IPEnableRouter`) to funnel ICS (Internet Connection Sharing) traffic through the WinTUN adapter.
 
 ---
 
-## Requirements
+## Prerequisites
 
-**Linux**
-
-| Dependency | Purpose |
-|---|---|
-| NetworkManager + nmcli | Create and manage the hotspot connection |
-| pkexec | Run privileged network commands |
-| iproute2 (`ip`) | TUN interface and routing table management |
-| iptables | Forward traffic between hotspot and TUN interfaces |
-| ping | Live device presence probing |
-
-**SOCKS5 proxy** running locally or accessible from your machine (e.g. `socks5://127.0.0.1:10808`).
-
----
-
-## Getting started
-
-### Prerequisites
-
+### Linux
+The following standard network utilities must be installed on your system:
 ```bash
-# Arch
+# Arch Linux
 sudo pacman -S networkmanager iproute2 iptables
 
 # Ubuntu / Debian
 sudo apt install network-manager iproute2 iptables
 ```
 
-Install Rust and the Tauri CLI:
+### Windows
+Windows requires the `wintun.dll` kernel driver to establish the virtual network interface.
+When you launch the app on Windows for the first time, it will prompt you to automatically download `wintun.dll` from the official source (`wintun.net`).
 
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-cargo install tauri-cli --version "^2"
-```
+---
 
-Install Node dependencies:
+## Getting Started
 
-```bash
-npm install
-```
+1. **Install Build Dependencies:**
+   Ensure you have Node.js and Rust installed.
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   npm install
+   ```
 
-### Development
+2. **Run in Development Mode:**
+   ```bash
+   npm run tauri dev
+   ```
 
-```bash
-npm run tauri dev
-```
-
-### Production build
-
-```bash
-npm run tauri build
-```
-
-The bundled app includes the `tun2socks` sidecar binary for both Linux (`x86_64`) and Windows (`x86_64`).
+3. **Build for Production:**
+   ```bash
+   npm run tauri build
+   ```
+   The bundled executable will be generated in `src-tauri/target/release/bundle/`.
 
 ---
 
 ## Configuration
 
-All settings are entered in the app UI before starting the hotspot:
+All configuration is done directly in the UI before initiating the hotspot:
 
 | Field | Description | Default |
 |---|---|---|
-| Network Name (SSID) | The Wi-Fi name devices will see | `MySecureHotspot` |
-| Password | WPA2 passphrase (8–63 chars) | — |
-| Proxy URL | SOCKS5 endpoint to route traffic through | `socks5://127.0.0.1:10808` |
-
-Settings are locked while the hotspot is active.
+| **Network Name (SSID)** | The Wi-Fi name broadcasted to devices. | `MySecureHotspot` |
+| **Password** | WPA2 security passphrase (min. 8 characters). | — |
+| **Proxy URL** | The upstream SOCKS5 endpoint. | `socks5://127.0.0.1:10808` |
 
 ---
 
-## How device detection works
+## Device Detection Mechanism
 
-Every 1.5 seconds the app:
-
-1. Reads the ARP neighbor table (`ip neigh show dev <iface>`) for candidate IPs
-2. Pings each candidate in parallel with a 500 ms timeout
-3. Only devices that respond are shown as connected
-
-This eliminates stale ARP entries that linger for minutes after a device disconnects, giving you an accurate live view.
+Most hotspots suffer from "ghost devices" — devices that remain in the ARP table for minutes after disconnecting. Hotspot Proxy solves this by:
+1. Reading the host's ARP neighbor table to find candidate IPs.
+2. Pinging each candidate in parallel with an aggressive 500ms timeout.
+3. Filtering the display to show *only* devices that actively respond to ICMP echoes.
 
 ---
 
-## Tech stack
+## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| UI | React 19 + TypeScript |
-| Build tool | Vite 7 |
-| Desktop shell | Tauri 2 |
-| Backend | Rust |
-| Traffic forwarding | tun2socks |
-| Hotspot management | NetworkManager (nmcli) |
-
----
-
-## Project structure
-
-```
-hotspot-proxy-app/
-├── src/                  # React frontend
-│   └── App.tsx           # Main UI — controls, device list, log console
-├── src-tauri/
-│   ├── src/
-│   │   ├── lib.rs        # Tauri commands: start/stop hotspot, device detection
-│   │   └── linux.rs      # Linux-specific hotspot and routing logic
-│   ├── bin/              # Bundled tun2socks binaries
-│   └── tauri.conf.json   # App config (window size, bundle targets, sidecar)
-└── package.json
-```
+- **UI:** React 19 + TypeScript
+- **Styling:** Custom CSS (No heavy UI frameworks)
+- **Desktop Shell:** Tauri 2
+- **Systems Integration:** Rust
+- **Core Routing:** `tun2socks` (Go)
 
 ---
 

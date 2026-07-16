@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 interface Device {
@@ -8,15 +9,91 @@ interface Device {
   name: string;
 }
 
+type WintunState = "checking" | "ok" | "prompt" | "downloading" | "error";
+
+function WintunModal({ onDone }: { onDone: () => void }) {
+  const [state, setState] = useState<WintunState>("checking");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    invoke<boolean>("check_wintun")
+      .then(ok => {
+        setState(ok ? "ok" : "prompt");
+        if (ok) onDone();
+      })
+      .catch((err) => {
+        console.error("wintun check failed:", err);
+        // If the check command fails entirely (e.g. not registered), just let them through
+        // so the app isn't bricked.
+        setState("ok");
+        onDone();
+      });
+  }, [onDone]);
+
+  async function handleDownload() {
+    setState("downloading");
+    try {
+      await invoke("download_wintun");
+      setState("ok");
+      onDone();
+    } catch (e) {
+      setError(String(e));
+      setState("error");
+    }
+  }
+
+  if (state === "checking" || state === "ok") return null;
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal-card">
+        <h2 className="modal-title">Required Component Missing</h2>
+        {state === "prompt" && (
+          <>
+            <p className="modal-body">
+              <strong>wintun.dll</strong> is required for proxy tunnelling on Windows but was not found.
+              May the app download it automatically from <em>wintun.net</em>?
+            </p>
+            <div className="modal-actions">
+              <button className="toggle-btn" onClick={handleDownload}>Download (≈ 500 KB)</button>
+            </div>
+          </>
+        )}
+        {state === "downloading" && (
+          <p className="modal-body">
+            <span className="spinner" style={{ display: "inline-block", marginRight: 10 }} />
+            Downloading wintun.dll…
+          </p>
+        )}
+        {state === "error" && (
+          <>
+            <p className="modal-body" style={{ color: "var(--danger)" }}>
+              Download failed: {error}
+            </p>
+            <p className="modal-body" style={{ fontSize: "0.82rem" }}>
+              You can place <strong>wintun.dll</strong> manually next to the app executable and restart.
+            </p>
+            <div className="modal-actions">
+              <button className="toggle-btn" onClick={handleDownload}>Retry</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [ssid, setSsid] = useState("MySecureHotspot");
   const [password, setPassword] = useState("SecurePassword123");
+  const [showPassword, setShowPassword] = useState(false);
   const [proxyUrl, setProxyUrl] = useState("socks5://127.0.0.1:10808");
   const [status, setStatus] = useState("");
   const [loading, setLoading] = useState(false);
   const [isActive, setIsActive] = useState(false);
   const [devices, setDevices] = useState<Device[]>([]);
   const [toast, setToast] = useState("");
+  const [wintunReady, setWintunReady] = useState(false);
 
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -136,28 +213,43 @@ function App() {
       }
     } catch (error) {
       addLog(`❌ Error:\n${error}`);
-      if (!isActive) setIsActive(false);
     }
     setLoading(false);
   }
 
   return (
-    <main className="container">
-      {toast && <div className="toast">{toast}</div>}
+    <>
+      {!wintunReady && <WintunModal onDone={() => setWintunReady(true)} />}
+      <main className="container">
+        {toast && <div className="toast">{toast}</div>}
 
       <header className="header">
-        <div className="logo-container">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="wifi-icon">
-            <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
-            <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
-            <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
-            <line x1="12" y1="20" x2="12.01" y2="20"></line>
+        <div className="header-left">
+          <div className="logo-container">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="wifi-icon">
+              <path d="M5 12.55a11 11 0 0 1 14.08 0"></path>
+              <path d="M1.42 9a16 16 0 0 1 21.16 0"></path>
+              <path d="M8.53 16.11a6 6 0 0 1 6.95 0"></path>
+              <line x1="12" y1="20" x2="12.01" y2="20"></line>
+            </svg>
+          </div>
+          <div>
+            <h1>Hotspot Proxy</h1>
+            <p className="subtitle">Route all devices through SOCKS5</p>
+          </div>
+        </div>
+        <button
+          onClick={(e) => {
+            e.preventDefault();
+            openUrl("https://github.com/HA-ir/hotspot-proxy");
+          }}
+          className="github-link"
+          title="View on GitHub"
+        >
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+            <path d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.462-1.11-1.462-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.379.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.161 22 16.416 22 12c0-5.523-4.477-10-10-10z"></path>
           </svg>
-        </div>
-        <div>
-          <h1>Hotspot Proxy</h1>
-          <p className="subtitle">Route all devices through SOCKS5</p>
-        </div>
+        </button>
       </header>
 
       <div className="layout-grid">
@@ -191,9 +283,9 @@ function App() {
                   {password.length}/63 (min 8)
                 </span>
               </label>
-              <div className="input-wrapper">
+              <div className="input-wrapper has-icon">
                 <input
-                  type="password"
+                  type={showPassword ? "text" : "password"}
                   value={password}
                   onChange={(e) => setPassword(e.currentTarget.value)}
                   disabled={isActive || loading}
@@ -201,6 +293,25 @@ function App() {
                   className={!isPasswordValid ? "invalid" : ""}
                   maxLength={63}
                 />
+                <button
+                  type="button"
+                  className="eye-btn"
+                  onClick={() => setShowPassword(!showPassword)}
+                  title={showPassword ? "Hide password" : "Show password"}
+                  disabled={isActive || loading}
+                >
+                  {showPassword ? (
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"></path>
+                      <line x1="1" y1="1" x2="23" y2="23"></line>
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                      <circle cx="12" cy="12" r="3"></circle>
+                    </svg>
+                  )}
+                </button>
               </div>
             </div>
 
@@ -248,8 +359,8 @@ function App() {
               <p className="no-devices">No devices connected yet.</p>
             ) : (
               <ul className="device-list">
-                {devices.map((d, i) => (
-                  <li key={i} className="device-item">
+                {devices.map((d) => (
+                  <li key={d.mac} className="device-item">
                     <div className="device-icon">
                       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect><rect x="9" y="9" width="6" height="6"></rect><line x1="9" y1="1" x2="9" y2="4"></line><line x1="15" y1="1" x2="15" y2="4"></line><line x1="9" y1="20" x2="9" y2="23"></line><line x1="15" y1="20" x2="15" y2="23"></line><line x1="20" y1="9" x2="23" y2="9"></line><line x1="20" y1="14" x2="23" y2="14"></line><line x1="1" y1="9" x2="4" y2="9"></line><line x1="1" y1="14" x2="4" y2="14"></line></svg>
                     </div>
@@ -289,6 +400,7 @@ function App() {
         </div>
       </div>
     </main>
+    </>
   );
 }
 

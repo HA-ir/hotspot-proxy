@@ -3,9 +3,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::{HashMap, HashSet};
 
 /// Auto-detect the first Wi-Fi capable network device via NetworkManager.
-/// Replaces the previous hardcoded "wlp0s20f3", which only worked on one machine.
 pub fn detect_wifi_interface() -> Result<String, String> {
     let output = Command::new("nmcli")
         .args(["-t", "-f", "DEVICE,TYPE", "device", "status"])
@@ -77,6 +77,106 @@ fn run_privileged_script(script: &str) -> Result<String, String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("Exit Code: {:?}\n-- STDOUT --\n{}\n-- STDERR --\n{}", output.status.code(), stdout, stderr))
     }
+}
+
+// Read DHCP leases for hostname enrichment only (mac -> hostname).
+fn read_dhcp_hostnames(wifi_if: &str) -> HashMap<String, String> {
+    let lease_path = format!("/var/lib/NetworkManager/dnsmasq-{}.leases", wifi_if);
+    let content = match fs::read_to_string(&lease_path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        // format: <expiry-epoch> <mac> <ip> <hostname-or-*> <client-id>
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 { continue; }
+        let expiry: u64 = match parts[0].parse() { Ok(v) => v, Err(_) => continue };
+        if expiry != 0 && expiry < now { continue; }
+        let mac = parts[1].to_lowercase();
+        if parts[3] != "*" {
+            map.insert(mac, parts[3].to_string());
+        }
+    }
+    map
+}
+
+// Probe whether an IP is still reachable by sending one ICMP ping (1s timeout).
+fn is_reachable(ip: &str, iface: &str) -> bool {
+    Command::new("ping")
+        .args(["-c", "1", "-W", "1", "-I", iface, "-n", ip])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn get_connected_devices() -> Result<Vec<crate::Device>, String> {
+    let wifi_if = detect_wifi_interface()?;
+    let hostnames = read_dhcp_hostnames(&wifi_if);
+
+    // Step 1: collect candidate IPs from the ARP table (exclude definitively dead states).
+    let arp_out = Command::new("ip")
+        .args(["neigh", "show", "dev", &wifi_if])
+        .output()
+        .map_err(|e| format!("Failed to run 'ip neigh': {}", e))?;
+
+    let mut candidates: Vec<(String, String)> = Vec::new(); // (ip, mac)
+    let mut seen_macs = HashSet::new();
+
+    if arp_out.status.success() {
+        let stdout = String::from_utf8_lossy(&arp_out.stdout);
+        for line in stdout.lines() {
+            if line.contains("FAILED") || line.contains("INCOMPLETE") || line.contains("NOARP") {
+                continue;
+            }
+            // format: <ip> dev <iface> lladdr <mac> <STATE>
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if let Some(idx) = parts.iter().position(|&t| t == "lladdr") {
+                if let Some(mac_str) = parts.get(idx + 1) {
+                    let ip = parts[0].to_string();
+                    let mac = mac_str.to_lowercase();
+                    if seen_macs.insert(mac.clone()) {
+                        candidates.push((ip, mac));
+                    }
+                }
+            }
+        }
+    }
+
+    // Step 2: probe each candidate in parallel, keep only live ones.
+    use std::thread;
+    let wifi_if_clone = wifi_if.clone();
+    let handles: Vec<_> = candidates
+        .into_iter()
+        .map(|(ip, mac)| {
+            let iface = wifi_if_clone.clone();
+            thread::spawn(move || {
+                if is_reachable(&ip, &iface) { Some((ip, mac)) } else { None }
+            })
+        })
+        .collect();
+
+    let mut devices: Vec<crate::Device> = Vec::new();
+    for h in handles {
+        match h.join() {
+            Ok(Some((ip, mac))) => {
+                let name = hostnames.get(&mac).cloned().unwrap_or_else(|| "Unknown Device".to_string());
+                devices.push(crate::Device { ip, mac, name });
+            }
+            Ok(None) => {}
+            Err(_) => eprintln!("ping thread panicked"),
+        }
+    }
+
+    Ok(devices)
 }
 
 pub fn start(_app: &tauri::AppHandle, ssid: &str, password: &str, proxy_url: &str) -> Result<String, String> {
@@ -160,7 +260,7 @@ echo "Hotspot started successfully and routed through the proxy."
 }
 
 pub fn stop() -> Result<String, String> {
-    let wifi_if = detect_wifi_interface().unwrap_or_else(|_| "wlan0".to_string());
+    let wifi_if = detect_wifi_interface()?;
     let hotspot_con_name = "ProxyHotspot";
     let tun_if = "tun0";
     let hotspot_subnet = "10.42.0.0/24";
@@ -195,4 +295,3 @@ echo "Hotspot stopped and cleanup completed."
 
     run_privileged_script(&script)
 }
-
