@@ -278,8 +278,9 @@ echo "Setting up Hotspot..."
 if ! nmcli con show "{hotspot_con_name}" > /dev/null 2>&1; then
     nmcli con add type wifi ifname {wifi_if} con-name "{hotspot_con_name}" autoconnect no ssid {ssid_q} > /dev/null
     nmcli con modify "{hotspot_con_name}" 802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared ipv6.method disabled
-    nmcli con modify "{hotspot_con_name}" wifi-sec.key-mgmt wpa-psk wifi-sec.psk {password_q}
 fi
+# Always update the SSID and Password in case they were changed in the UI
+nmcli con modify "{hotspot_con_name}" 802-11-wireless.ssid {ssid_q} wifi-sec.key-mgmt wpa-psk wifi-sec.psk {password_q}
 nmcli con up "{hotspot_con_name}" > /dev/null
 
 echo "Setting up TUN interface..."
